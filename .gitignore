@@ -1,0 +1,41 @@
+# === SENSITIVE / PRIVATE — NEVER COMMIT THESE ===
+
+# API Keys (Google Gemini, etc.)
+.env
+*.env
+secrets.py
+
+# Large model files — too big for GitHub (>100MB limit)
+*.gguf
+*.ggml
+*.bin
+
+# PyTorch model weights
+*.pt
+*.pth
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+env/
+venv/
+.venv/
+*.egg-info/
+
+# Streamlit cache
+.streamlit/secrets.toml
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+logs/
