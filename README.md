@@ -1,4 +1,4 @@
-# SRISH — Tomato Leaf Expert 🍅
+# SRISH — Tomato Leaf Expert 🍅 
 
 An intelligent, agentic chatbot and computer vision system for tomato crop disease detection. SRISH combines a **fine-tuned Llama 3.2 language model**, **YOLOv8 object detection**, and **Gemini-powered intent routing** into a single Streamlit web application — designed specifically for Indian farmers, with full Hinglish language support.
 
