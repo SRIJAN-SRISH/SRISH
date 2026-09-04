@@ -1,4 +1,4 @@
-# SRIJAN-SRISH — Project Portfolio
+# SRIJAN-SRISH
 
 This repository hosts two independent projects:
 
