@@ -102,6 +102,23 @@ def _looks_hinglish(text: str) -> bool:
     return bool(_HINGLISH_HINTS.search(text)) or bool(re.search(r"[ऀ-ॿ]", text))
 
 
+_TOMATO_MENTION = re.compile(
+    r"(tomato|tomatoes|tamatar|tamaatar|टमाटर)", re.I
+)
+
+
+def mentions_tomato(text: str) -> bool:
+    """Does the message name the crop at all?
+
+    Used to stop the router refusing questions that are plainly in scope. It
+    classified "how many calories are there in 100 gms of tomatoes" as
+    off_topic whenever a greeting came first, reasoning that nutrition is not
+    farming -- and an off_topic plan skips the chat model entirely, so the
+    farmer got a refusal instead of an answer.
+    """
+    return bool(_TOMATO_MENTION.search(text))
+
+
 # ── LLM BACKENDS ──────────────────────────────────────────────────────────────
 
 def _llm_json(prompt: str) -> dict:
@@ -207,8 +224,11 @@ Classify the user's latest message and return JSON only.
 === INTENTS ===
 - greeting       : hi, hello, namaste, who are you
 - tomato_disease : ANY plant problem or symptom (spots, yellowing, wilting, drying, bugs, rot)
-- tomato_general : tomato/farming question that is NOT a symptom — how to grow, appearance,
-                   watering, sunlight, soil, harvest, taste, height, colour
+- tomato_general : ANY question about tomatoes that is not a plant problem. This is broad —
+                   growing, appearance, watering, sunlight, soil, harvest, height, colour,
+                   AND nutrition (calories, vitamins, protein, sugar, health benefits),
+                   eating, cooking, recipes, taste, storage, shelf life, varieties,
+                   seeds, yield, selling, price and market.
 - farm_status    : asks for farm/sensor readings with NO time range ("farm data dikhao",
                    "soil moisture", "khet ka data", "farm status", "NPK")
 - farm_report    : asks for data over a TIME RANGE ("last 10 days", "is hafte ki report",
@@ -222,6 +242,15 @@ movies, actors, politicians (Modi), singers, tech companies unrelated to farming
 short form or acronym unrelated to tomatoes. A person's NAME is NEVER a plant, disease,
 bacterium or virus — never invent a disease named after a person. For off_topic, write a
 short warm refusal in "direct_reply" in the user's own language. Otherwise "direct_reply": null.
+
+=== THE LIMIT OF THE BOUNCER — READ THIS BEFORE USING off_topic ===
+If the message is about tomatoes in ANY way, it is NOT off_topic. Srish knows tomatoes as
+a crop AND as a food: how many calories in 100g, which vitamins they carry, whether they
+are good for health, how to cook or store them, what they cost — all of these are
+tomato_general and must be answered, not refused.
+off_topic is only for subjects with nothing to do with plants, food or farming at all.
+Judge the LATEST message on its own. Earlier turns in the conversation never make a
+tomato question off-topic.
 
 === KB LOOKUP ===
 Set "use_kb": true ONLY if intent is tomato_disease AND a disease above closely matches the
@@ -265,6 +294,18 @@ Return ONLY valid JSON. No markdown fences. No extra text.
         plan["language"] = "hinglish" if _looks_hinglish(user_message) else "english"
     if not plan.get("context_summary"):
         plan["context_summary"] = user_message
+
+    # Never refuse a question that names the crop. The router drifts here,
+    # especially once there is conversation history, and because an off_topic
+    # plan answers directly without consulting the chat model, a bad call shows
+    # the farmer a flat refusal with no way back.
+    if plan.get("intent") == "off_topic" and mentions_tomato(user_message):
+        log.info("Router said off_topic for a tomato question; treating as general: %r",
+                 user_message[:80])
+        plan["intent"] = "tomato_general"
+        plan["direct_reply"] = None
+        plan["use_kb"] = False
+
     if plan.get("intent") == "off_topic" and not plan.get("direct_reply"):
         plan["direct_reply"] = OFF_TOPIC_REPLY[plan["language"]]
     if plan.get("intent") == "farm_report":
