@@ -6,11 +6,8 @@ from streamlit_cropper import st_cropper
 from PIL import Image
 import io
 import ollama
-import json
-import re
-import httpx
-import google.generativeai as genai
-import os
+import farm_data
+import pandas as pd
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,291 +17,28 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── GEMINI SETUP ──────────────────────────────────────────────────────────────
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-gemini = genai.GenerativeModel("gemini-1.5-flash")   # free tier model
+# ── BRAIN ──────────────────────────────────────────────────────────────────────
+# Routing, prompt building and the farm/web lookups all live in srish_core,
+# which api_server.py shares. Keeping them there means the Streamlit UI and the
+# Srijan mobile app can never drift apart in how they answer. This file is only
+# the UI on top of that brain.
+import srish_core
+from srish_core import (
+    build_system_prompt,
+    detect_farm_intent_override,
+    fetch_url_smart,
+    get_kb_entry_by_name,
+    orchestrate,
+)
 
-# ── RAG: LOAD KNOWLEDGE BASE ──────────────────────────────────────────────────
+
 @st.cache_data
 def load_knowledge_base():
-    try:
-        with open("tomato_data_clean.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-    except Exception as e:
-        st.error(f"Error loading knowledge base: {e}")
-        return []
+    """Streamlit-cached view of the shared KB loader."""
+    return srish_core.load_knowledge_base()
+
 
 tomato_db = load_knowledge_base()
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#   GEMINI ORCHESTRATOR — pure intelligence, zero hardcoded keywords
-# ════════════════════════════════════════════════════════════════════════════════
-
-def gemini_orchestrate(user_message: str, chat_history: list, tomato_db: list) -> dict:
-    """
-    Gemini reads the full conversation and returns a structured JSON plan.
-    """
- 
-    recent_turns = chat_history[-6:] if len(chat_history) > 6 else chat_history
-    conv_snapshot = "\n".join(
-        f"{m['role'].upper()}: {m['content'][:300]}" for m in recent_turns
-    )
- 
-    kb_summary = []
-    for entry in tomato_db:
-        c = entry.get("content", {})
-        kb_summary.append({
-            "disease_name": c.get("disease_name", ""),
-            "keywords": str(c.get("signs_and_symptoms", ""))[:200]
-        })
-    kb_json = json.dumps(kb_summary, ensure_ascii=False)
- 
-    orchestration_prompt = f"""You are the intelligence routing agent for "Srish", a tomato plant & disease expert chatbot.
- 
-Analyze the user's latest message and return a JSON plan.
- 
-=== RECENT CONVERSATION ===
-{conv_snapshot}
- 
-=== USER'S LATEST MESSAGE ===
-{user_message}
- 
-=== AVAILABLE KNOWLEDGE BASE DISEASES ===
-{kb_json}
- 
-=== INTENT DEFINITIONS (read carefully) ===
-- "greeting"        : hi, hello, who are you, namaste, etc.
-- "tomato_disease"  : user describes symptoms, spots, drying, bugs, yellowing, wilting, any plant problem
-- "tomato_general"  : ANY question about tomatoes or farming that is NOT a disease symptom.
-                      THIS INCLUDES: what does a tomato plant look like, how to grow tomatoes,
-                      watering, sunlight, appearance, color, shape, height, smell, taste, harvest, soil, etc.
-- "url_query"       : user pastes a URL/link
-- "off_topic"       : completely unrelated to farming, plants, food, agriculture (sports, movies, politics, etc.)
- 
-=== KB LOOKUP RULES ===
-- Set "use_kb": true ONLY if intent is "tomato_disease" AND a disease from the KB list closely matches symptoms.
-- If "use_kb" is true, set "kb_disease_name" to the EXACT disease name from the KB list.
-- If no KB match, set "use_kb": false and "kb_disease_name": null.
- 
-=== STRICT RULES ===
-1. Fill "reasoning" first. Think step by step about what the user is asking.
-2. "tomato_general" covers ALL appearance, growth, gardening questions — do NOT mark these as off_topic.
-3. Only "off_topic" for things truly unrelated to plants/food/farming (cricket, movies, politicians).
-4. Detect language: "hinglish" if message uses Hindi words or Roman Hindi. Otherwise "english".
-5. For off_topic, write a polite refusal in "direct_reply".
-6. For all other intents, set "direct_reply": null — let Ollama answer.
-7. Fill "reasoning" first.
-8. BOUNCER RULE — these topics are ALWAYS "off_topic", no exceptions:
-   - Cricket, IPL, sports players (Kohli, Dhoni, Tendulkar, Messi, etc.)
-   - Movies, actors, directors
-   - Politicians, political parties
-   - Music, singers
-   - Technology companies (Google, Apple, etc.) unrelated to farming
-   - Any person's name that is not a scientist or farmer
-   If the user mentions ANY of the above, set intent="off_topic" and write a refusal in "direct_reply".
-9. A person's NAME (Kohli, Sachin, Modi, Shah Rukh) is NEVER a plant, disease, bacterium, or virus.
-   Do NOT invent a disease named after a person.
-10. "tomato_general" covers ALL appearance, growth, gardening questions.
-11. Detect language: "hinglish" if message uses Hindi words or Roman Hindi.
-12.Also don't answer the terms like ipl, fifa like things or any short from or word that is not related to the tomatoes and it's diseases.
-=== EXAMPLES ===
- 
-User: "waise ye tomato plant dikhta kaisa hai"
-JSON: {{"reasoning": "User is asking about the appearance/looks of a tomato plant. This is a general tomato question about how the plant looks.", "intent": "tomato_general", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User wants to know what a tomato plant looks like — its appearance, shape, leaves, height, color.", "direct_reply": null, "language": "hinglish"}}
- 
-User: "how the tomato plant looks like"
-JSON: {{"reasoning": "User is asking about the visual appearance of a tomato plant. This is a general tomato question.", "intent": "tomato_general", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": false, "context_summary": "User wants to know what a tomato plant looks like — its appearance, shape, leaves, color, height.", "direct_reply": null, "language": "english"}}
- 
-User: "meri plant ke patte peele ho rahe hain"
-JSON: {{"reasoning": "User says their plant leaves are turning yellow. This is a disease/health symptom.", "intent": "tomato_disease", "use_kb": true, "kb_disease_name": "Early Blight", "url": null, "topic_changed": true, "context_summary": "User's tomato plant leaves are turning yellow.", "direct_reply": null, "language": "hinglish"}}
- 
-User: "Do you know Kohli?"
-JSON: {{"reasoning": "User is asking about Virat Kohli, a cricketer. Completely unrelated to tomatoes.", "intent": "off_topic", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User is asking about cricket.", "direct_reply": "Main ek tomato crop expert hoon! Mujhe cricket ke baare mein nahi pata. Kya main aapki fasal ki koi madad kar sakti hoon? 🍅", "language": "hinglish"}}
- 
-User: "Mera plant sookh raha hai"
-JSON: {{"reasoning": "User says their plant is drying up. This is a symptom of a problem.", "intent": "tomato_disease", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User's tomato plant is drying up and wilting.", "direct_reply": null, "language": "hinglish"}}
-
-User: "do you know about kohli"
-JSON: {{"reasoning": "Kohli is Virat Kohli, a famous Indian cricketer. This has nothing to do with tomatoes or farming.", "intent": "off_topic", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User asked about cricketer Virat Kohli.", "direct_reply": "Main sirf tomato aur farming ke baare mein jaanti hoon! Kohli ke baare mein mujhse mat poochho 😄 Kya aapke tomato plants mein koi problem hai? 🍅", "language": "hinglish"}}
-
-User: "do you know about ipl"
-JSON: {{"reasoning": "IPL is the Indian Premier League, a cricket tournament. This is completely unrelated to tomatoes or farming.", "intent": "off_topic", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User asked about IPL cricket.", "direct_reply": "IPL toh mujhe nahi pata Ji! Main toh bas tomato ki expert hoon 🍅 Kya khet mein koi dikkat hai?", "language": "hinglish"}}
-
-User: "who is modi"
-JSON: {{"reasoning": "Modi refers to a political leader. This is off-topic for a tomato expert bot.", "intent": "off_topic", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User asked about a politician.", "direct_reply": "Politics mera subject nahi hai! Main sirf aapke tomato plants ki baat kar sakti hoon 🌿", "language": "hinglish"}}
-
-User: "waise ye tomato plant dikhta kaisa hai"
-JSON: {{"reasoning": "User is asking about the appearance of a tomato plant. General tomato question.", "intent": "tomato_general", "use_kb": false, "kb_disease_name": null, "url": null, "topic_changed": true, "context_summary": "User wants to know what a tomato plant looks like.", "direct_reply": null, "language": "hinglish"}}
-
-User: "meri plant ke patte peele ho rahe hain"
-JSON: {{"reasoning": "User says leaves are turning yellow. This is a disease symptom.", "intent": "tomato_disease", "use_kb": true, "kb_disease_name": "Early Blight", "url": null, "topic_changed": true, "context_summary": "User's tomato plant leaves are turning yellow.", "direct_reply": null, "language": "hinglish"}} 
-=== YOUR TASK ===
-Return ONLY valid JSON. No markdown fences. No extra text.
-"""
-    try:
-        response = gemini.generate_content(orchestration_prompt)
-        raw = response.text.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        plan = json.loads(raw)
-        return plan
-    except Exception:
-        return {
-            "intent": "tomato_general",
-            "use_kb": False,
-            "kb_disease_name": None,
-            "url": None,
-            "topic_changed": False,
-            "context_summary": user_message,
-            "direct_reply": None,
-            "language": "english"
-        }
-
-def get_kb_entry_by_name(disease_name: str, db: list) -> dict | None:
-    """Fetch full KB entry by disease name that Gemini identified."""
-    if not disease_name or not db:
-        return None
-    name_lower = disease_name.lower().strip()
-    for entry in db:
-        c = entry.get("content", {})
-        if c.get("disease_name", "").lower().strip() == name_lower:
-            return c
-    # Fuzzy fallback
-    for entry in db:
-        c = entry.get("content", {})
-        db_name = c.get("disease_name", "").lower()
-        if name_lower in db_name or db_name in name_lower:
-            return c
-    return None
-
-
-def fetch_url_smart(url: str, user_question: str, max_words: int = 750) -> str:
-    """
-    Fetch a webpage and use Gemini to extract the most relevant ~750 words
-    that directly answer the user's question. Smart, not mechanical.
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        resp = httpx.get(url, headers=headers, timeout=12, follow_redirects=True)
-        resp.raise_for_status()
-
-        # Strip HTML tags
-        raw_text = re.sub(r"<[^>]+>", " ", resp.text)
-        raw_text = re.sub(r"\s+", " ", raw_text).strip()
-
-        extraction_prompt = f"""From the webpage content below, extract the most relevant {max_words} words 
-that directly and specifically answer the user's question.
-Write as clean flowing prose — no HTML artifacts, no broken text.
-Focus only on content relevant to the question.
-
-USER'S QUESTION: {user_question}
-
-WEBPAGE CONTENT:
-{raw_text[:6000]}
-
-Return ONLY the extracted relevant content, nothing else."""
-
-        extraction = gemini.generate_content(extraction_prompt)
-        return extraction.text.strip()
-
-    except Exception as e:
-        return f"[Website could not be read: {e}]"
-
-
-def build_system_prompt(plan: dict, context_summary: str, kb_entry: dict | None, url_content: str | None, depth_mode: bool) -> str:
-    """Builds a dynamic SYSTEM prompt for this specific turn."""
- 
-    intent = plan.get("intent", "tomato_general")
-    language = plan.get("language", "hinglish")
- 
-    # AGENTIC BYPASS for greetings / off-topic
-    if plan.get("direct_reply"):
-        return (
-            f"[STRICT TASK] Output EXACTLY the following text and nothing else. "
-            f"Do not add, change, or translate anything.\n\nTEXT: {plan['direct_reply']}"
-        )
- 
-    # ── LANGUAGE RULE ──
-    if language == "hinglish":
-        lang_rule = (
-            "Speak in warm, natural Hinglish (mix of Hindi and English). "
-            "Use simple Hindi words the farmer understands. "
-            "Do NOT use overly technical English unless needed."
-        )
-    else:
-        lang_rule = "Speak in clear, friendly, practical English."
- 
-    # ── DEPTH RULE ──
-    if depth_mode:
-        depth_rule = (
-            "[FORMAT] Give a detailed, structured answer. "
-            "Use headings, bullet points, and bold key terms."
-        )
-    else:
-        depth_rule = (
-            "[FORMAT] Give a concise, practical answer in 3-5 sentences or short bullets. "
-            "Do NOT pad the answer. Do NOT repeat the question back."
-        )
- 
-    base_rules = (
-        "You are Srish, a friendly 25-year-old expert agricultural botanist specializing in tomatoes.\n"
-        "ANTI-HALLUCINATION RULES:\n"
-        "1. Answer ONLY based on facts given to you in this prompt or standard agricultural knowledge.\n"
-        "2. NEVER invent disease names, treatments, or chemicals not mentioned here.\n"
-        "3. If you truly don't know, say so honestly.\n"
-        "4. ALWAYS directly answer the user's actual question first.\n"
-        f"{lang_rule}\n"
-        f"{depth_rule}\n\n"
-    )
- 
-    # ── URL QUERY ──
-    if intent == "url_query" and url_content:
-        if "[Website could not be read" in url_content:
-            return base_rules + "[TASK] Tell the user you couldn't access their website, but answer from general knowledge."
-        return base_rules + (
-            "[TASK] Answer using the website content below as your primary source.\n"
-            f"WEBSITE CONTENT:\n{url_content}\n\n"
-            f"USER'S QUESTION: {context_summary}"
-        )
- 
-    # ── DISEASE WITH KB ENTRY ──
-    if intent == "tomato_disease" and kb_entry:
-        return base_rules + (
-            "[STRICT TASK] Answer using ONLY the database record below. "
-            "DO NOT suggest treatments not listed here.\n\n"
-            f"Disease: {kb_entry.get('disease_name', '')}\n"
-            f"Symptoms: {kb_entry.get('signs_and_symptoms', '')}\n"
-            f"Treatment: {kb_entry.get('cure__control_and_management', '')}\n\n"
-            f"USER'S QUESTION: {context_summary}"
-        )
- 
-    # ── DISEASE WITHOUT KB ENTRY ──
-    if intent == "tomato_disease":
-        return base_rules + (
-            "[TASK] The user is describing a plant problem. "
-            "Ask 1-2 clarifying questions about the symptoms (color of leaves, which part of plant, how long, etc.) "
-            "so you can better diagnose the issue. Be warm and helpful.\n\n"
-            f"USER'S QUESTION: {context_summary}"
-        )
- 
-    # ── GENERAL TOMATO QUESTION (appearance, growth, farming, etc.) ──
-    if intent == "tomato_general":
-        return base_rules + (
-        "[TASK] Answer this tomato/farming question directly. "
-        "CRITICAL: Only state facts you are 100% certain about. "
-        "Key facts to never get wrong:\n"
-        "- Tomato flowers are YELLOW, not white\n"
-        "- Water needs: 1-2 liters every 2-3 days for pot plants, not liters per week\n"
-        "- If asked about varieties, only mention: Pusa Ruby, Pusa Early Dwarf, Arka Vikas, Naveen, Punjab Chhuhara\n"
-        "- If unsure about a specific fact, say 'mujhe is baare mein pakki jankari nahi' instead of guessing\n\n"
-        f"USER'S QUESTION: {context_summary}"
-    )
- 
-    return base_rules + "[TASK] Answer helpfully based on your agricultural expertise."
 # ════════════════════════════════════════════════════════════════════════════════
 #   CSS & ANIMATIONS
 # ════════════════════════════════════════════════════════════════════════════════
@@ -476,7 +210,7 @@ st.markdown("""
 # ── LOAD MODELS ───────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_gatekeeper():
-    return YOLO("best.pt")
+    return YOLO(r"C:\Users\Prateek\Downloads\best (5).pt")
 
 @st.cache_resource
 def load_yolo():
@@ -652,7 +386,7 @@ st.markdown("<div style='margin-top:60px;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div class="how-title">
   Chat with <em>Srish</em><br>
-  <span class="intel-badge">🧠 Sponsored by DMSL</span>
+  <span class="intel-badge">🧠</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -688,13 +422,27 @@ if prompt := st.chat_input("Ask Srish about your tomatoes..."):
     with st.chat_message("assistant", avatar="🍅"):
         try:
             with st.spinner("🧠 Understanding your question..."):
-                plan = gemini_orchestrate(
+                plan = orchestrate(
                     user_message=prompt,
                     chat_history=st.session_state.messages[:-1],
                     tomato_db=tomato_db
                 )
 
-            # ── EARLY EXIT: Gemini already wrote the reply (off_topic / greeting) ──
+            # ── KEYWORD OVERRIDE: correct Gemini mis-routing for farm queries ──
+            if plan.get("_degraded"):
+                st.warning(
+                    "⚠️ Router unavailable — answering without intent routing, so the "
+                    "off-topic filter and the knowledge base were both skipped."
+                )
+
+            farm_override = detect_farm_intent_override(prompt)
+            if farm_override and plan.get("intent") not in ("farm_status", "farm_report"):
+                plan["intent"] = farm_override
+                plan["direct_reply"] = None
+                plan["use_kb"] = False
+                plan["context_summary"] = plan.get("context_summary", prompt)
+
+            # ── EARLY EXIT: the router already wrote the reply (off_topic / greeting) ──
             if plan.get("direct_reply"):
                 reply = plan["direct_reply"]
                 st.markdown(reply)
@@ -711,6 +459,30 @@ if prompt := st.chat_input("Ask Srish about your tomatoes..."):
                     with st.spinner("🌐 Reading website for you..."):
                         url_content = fetch_url_smart(plan["url"], prompt)
 
+                # ── FARM DATA (live Supabase facts) ──
+                farm_id = "FARM_001"
+                farm_facts = None
+                if plan.get("intent") == "farm_status":
+                    farm_facts = farm_data.facts_latest_status(farm_id)
+                elif plan.get("intent") == "farm_report":
+                    days = int(plan.get("days", 7))
+                    farm_facts, rows = farm_data.get_report(farm_id, days)
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        if "recorded_at" in df and "vwc_percent" in df:
+                            st.line_chart(df.set_index("recorded_at")[["vwc_percent"]])
+
+                # ── HARD NO-DATA EXIT: skip Ollama entirely if Supabase has nothing ──
+                if farm_facts and farm_facts.startswith(("NO_FARM_DATA", "NO_DATA")):
+                    reply = (
+                        "Abhi koi farm sensor data available nahi hai. 🌱\n\n"
+                        "Sensor se koi reading nahi aayi — please thodi der baad try karein, "
+                        "ya check karein ki sensor connected hai."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+
                 system_instruction = build_system_prompt(
                     plan=plan,
                     context_summary=plan.get("context_summary", prompt),
@@ -718,6 +490,13 @@ if prompt := st.chat_input("Ask Srish about your tomatoes..."):
                     url_content=url_content,
                     depth_mode=depth_mode
                 )
+                # ── Inject real farm facts into the system prompt ──
+                if farm_facts:
+                    system_instruction = (
+                        farm_facts
+                        + "\n\nUse ONLY the numbers above — do NOT invent or estimate any value.\n\n"
+                        + system_instruction
+                    )
 
                 messages_for_ollama = [{"role": "system", "content": system_instruction}]
 
