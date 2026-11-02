@@ -71,6 +71,9 @@ class ChatResponse(BaseModel):
     # True when the router was unreachable: the off-topic filter and the KB
     # lookup were both skipped for this turn, so the answer is less trustworthy.
     degraded: bool = False
+    # True when Ollama could not be reached at all. Clients should show this as
+    # the bot being offline rather than rendering `reply` as a real answer.
+    backend_down: bool = False
     used_kb: bool = False
     kb_disease: str | None = None
     farm_rows: list[dict] = []
@@ -92,16 +95,33 @@ def health() -> dict:
     except Exception as e:
         log.warning("Ollama unreachable: %s", e)
 
+    router_ok = srish_core.ROUTER_MODEL in models
+    chat_ok = any(
+        (m or "").split(":")[0] == srish_core.CHAT_MODEL.split(":")[0] for m in models
+    )
+    # "ready" is the only field a client needs to decide online vs offline.
+    # The API process can be perfectly healthy while Ollama is stopped, in which
+    # case Srish cannot answer anything -- so a 200 here does not mean usable.
+    ready = ollama_ok and router_ok and chat_ok
+
+    reasons = []
+    if not ollama_ok:
+        reasons.append("Ollama is not running")
+    if ollama_ok and not router_ok:
+        reasons.append(f"router model {srish_core.ROUTER_MODEL} is not installed")
+    if ollama_ok and not chat_ok:
+        reasons.append(f"chat model {srish_core.CHAT_MODEL} is not installed")
+
     return {
-        "status": "ok" if ollama_ok else "degraded",
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
+        "not_ready_because": reasons,
         "ollama": ollama_ok,
         "orchestrator": srish_core.ORCHESTRATOR,
         "router_model": srish_core.ROUTER_MODEL,
-        "router_model_present": srish_core.ROUTER_MODEL in models,
+        "router_model_present": router_ok,
         "chat_model": srish_core.CHAT_MODEL,
-        "chat_model_present": any(
-            (m or "").split(":")[0] == srish_core.CHAT_MODEL.split(":")[0] for m in models
-        ),
+        "chat_model_present": chat_ok,
         "kb_entries": len(srish_core.load_knowledge_base()),
     }
 

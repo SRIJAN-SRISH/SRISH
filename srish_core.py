@@ -373,9 +373,16 @@ def build_system_prompt(
             "Use headings, bullet points, and bold key terms."
         )
     else:
+        # This is the default, and it is what the mobile app gets, so it has to
+        # be brief without being thin. The earlier wording ("concise... do NOT
+        # pad") made a 7B model answer a nutrition question in one short line
+        # while the detailed mode gave five useful sentences. 3 sentences is a
+        # floor here, not a ceiling.
         depth_rule = (
-            "[FORMAT] Give a concise, practical answer in 3-5 sentences or short bullets. "
-            "Do NOT pad the answer. Do NOT repeat the question back."
+            "[FORMAT] Answer in 3 to 6 sentences, or short bullets where that reads "
+            "better. Give the actual numbers or steps and the practical takeaway for "
+            "the farmer — a single-line answer is too thin to be useful. Do not "
+            "restate the question and do not add filler."
         )
 
     base_rules = (
@@ -429,16 +436,25 @@ def build_system_prompt(
         )
 
     if intent == "tomato_general":
+        # The accuracy rules below used to be the last thing the model read, and
+        # being told to state only what it is certain of made it answer a plain
+        # factual question in a single line. The shape instruction therefore
+        # comes last: be accurate AND useful, not accurate and terse.
         return base_rules + (
-            "[TASK] Answer this tomato/farming question directly. "
-            "CRITICAL: Only state facts you are 100% certain about. "
+            "[TASK] Answer this tomato/farming question.\n"
+            "ACCURACY: Only state facts you are confident about. "
             "Key facts to never get wrong:\n"
             "- Tomato flowers are YELLOW, not white\n"
             "- Water needs: 1-2 liters every 2-3 days for pot plants, not liters per week\n"
             "- If asked about varieties, only mention: Pusa Ruby, Pusa Early Dwarf, Arka Vikas, "
             "Naveen, Punjab Chhuhara\n"
-            "- If unsure about a specific fact, say 'mujhe is baare mein pakki jankari nahi' "
-            "instead of guessing\n\n"
+            "- If unsure about a specific detail, say 'mujhe is baare mein pakki jankari nahi' "
+            "for that detail, and still answer the rest\n\n"
+            "SHAPE OF THE ANSWER — follow this:\n"
+            "1. First sentence: answer the question directly, with the number or the fact.\n"
+            "2. Then 2-4 more sentences of genuinely useful context — why it matters, how it "
+            "varies, or what the farmer should do about it.\n"
+            "Being brief is not the goal; being useful is. Never stop at one sentence.\n\n"
             f"USER'S QUESTION: {context_summary}"
         )
 
@@ -476,6 +492,9 @@ def _prepare(
         "intent": plan.get("intent"),
         "language": plan.get("language"),
         "degraded": bool(plan.get("_degraded")),
+        # True when Ollama itself could not be reached. A client should treat
+        # this as "the bot is offline", not as an answer it can show.
+        "backend_down": False,
         "used_kb": False,
         "kb_disease": None,
         "farm_rows": [],
@@ -570,6 +589,7 @@ def answer(
         log.error("Chat model unavailable: %s", e)
         out["reply"] = UNAVAILABLE_REPLY
         out["error"] = str(e)
+        out["backend_down"] = True
 
     return out
 
@@ -616,7 +636,10 @@ def answer_stream(
     except Exception as e:
         log.error("Chat model unavailable: %s", e)
         out["error"] = str(e)
+        # Only an outage if nothing was generated. A stream that dies halfway
+        # still produced a real partial answer, so do not call the bot offline.
         if not chunks:
+            out["backend_down"] = True
             chunks.append(UNAVAILABLE_REPLY)
             yield "token", UNAVAILABLE_REPLY
 
