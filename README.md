@@ -1,6 +1,10 @@
 # SRISH — Tomato Leaf Expert 🍅 
 
-An intelligent, agentic chatbot and computer vision system for tomato crop disease detection. SRISH combines a **fine-tuned Llama 3.2 language model**, **YOLOv8 object detection**, and **Gemini-powered intent routing** into a single Streamlit web application — designed specifically for Indian farmers, with full Hinglish language support.
+An intelligent, agentic chatbot and computer vision system for tomato crop disease detection. SRISH combines a **fine-tuned Llama 3.2 language model**, **YOLOv8 object detection**, and **local-LLM intent routing** — designed specifically for Indian farmers, with full Hinglish language support.
+
+It runs as a Streamlit web app, and serves the [Srijan mobile app](https://github.com/SRIJAN-SRISH/sriapp) over an HTTP API. Both front-ends share one brain (`srish_core.py`), so they always answer the same way.
+
+**No API key is needed.** Routing used to go through Gemini; it now runs on a local Ollama model, so Srish works fully offline.
 
 ---
 
@@ -10,10 +14,10 @@ An intelligent, agentic chatbot and computer vision system for tomato crop disea
 |---|---|
 | 🔍 Leaf Verification | A gatekeeper YOLO classifier confirms the uploaded image is actually a tomato leaf before any analysis |
 | 🎯 Disease Detection | A custom-trained YOLOv8 model detects Leaf Miner damage with bounding box annotations |
-| 🧠 Gemini Orchestrator | Gemini 1.5 Flash acts as a zero-keyword intent router — classifying every message into disease, general, greeting, URL, or off-topic |
+| 🧠 Intent Router | A local Ollama model acts as a zero-keyword intent router — classifying every message into disease, general, greeting, URL, farm-data, or off-topic |
 | 💬 Fine-tuned LLM Chat | A Llama 3.2 3B model fine-tuned on tomato disease data (via LoRA/SFTTrainer) answers crop questions as "Srish" |
 | 📚 RAG Knowledge Base | 12 tomato diseases with symptoms, causes, and treatments stored in a structured JSON knowledge base |
-| 🌐 URL Reading | Users can paste any farming article URL; Gemini extracts the relevant content and answers based on it |
+| 🌐 URL Reading | Users can paste any farming article URL; the router extracts the relevant content and answers based on it |
 | 🌿 Hinglish Support | Automatically detects Hindi/English mix and responds in natural Hinglish for farmer accessibility |
 | ✂️ Image Cropping | Built-in cropper lets users isolate the leaf before analysis |
 | 📷 Live Camera | Supports direct camera capture from the browser |
@@ -30,10 +34,10 @@ User (Streamlit UI)
     │       └── Disease YOLO    → Leaf Miner detection + bounding boxes
     │
     └── Chat Message
-            ├── Gemini Orchestrator → intent classification (zero keywords)
+            ├── Intent Router (local LLM) → intent classification (zero keywords)
             │       ├── off_topic   → polite refusal (direct, no LLM)
             │       ├── greeting    → direct reply
-            │       ├── url_query   → Gemini reads URL → context → Ollama
+            │       ├── url_query   → router reads URL → context → Ollama
             │       ├── tomato_disease + KB match → RAG context → Ollama
             │       ├── tomato_disease (no match)  → clarifying questions
             │       └── tomato_general → Ollama answers directly
@@ -47,7 +51,10 @@ User (Streamlit UI)
 
 ```
 srish/
-├── agentic_bot.py          # Main Streamlit application
+├── srish_core.py           # The brain: routing, prompts, KB, farm + web lookups
+├── agentic_bot.py          # Streamlit UI on top of srish_core
+├── api_server.py           # HTTP API for the Srijan mobile app
+├── farm_data.py            # Live farm sensor facts, via the n8n webhook
 ├── jason_formation.py      # Script that builds tomato_data_clean.json
 ├── tomato_data_clean.json  # RAG knowledge base (12 tomato diseases)
 ├── Merger.jsonl            # Fine-tuning dataset (merged conversations)
@@ -79,18 +86,36 @@ cd srish
 pip install -r requirements.txt
 ```
 
-### 3. Set your Google Gemini API key
+### 3. Configuration (all optional)
 
-Create a `.streamlit/secrets.toml` file:
+Srish needs no API key. Defaults work out of the box; every value is an
+environment variable:
 
-```toml
-GOOGLE_API_KEY = "your-gemini-api-key-here"
-```
+| Variable | Default | What it does |
+|---|---|---|
+| `SRISH_ROUTER_MODEL` | `qwen2.5:7b` | Ollama model that classifies intent |
+| `SRISH_CHAT_MODEL` | `qwen2.5:7b` | Ollama model that writes the answer |
+| `SRISH_ORCHESTRATOR` | `ollama` | Set to `gemini` to route via Gemini instead |
+| `SRISH_KEEP_ALIVE` | `30m` | How long Ollama holds the model in memory |
+| `N8N_FARM_URL` | `http://localhost:5678/webhook/farm-data` | Farm sensor webhook |
+| `SRISH_FARM_ID` | `FARM_001` | Which farm to report on |
 
-Or set it as an environment variable:
+**Picking models for your GPU.** The router and the chat model both have to be
+resident in VRAM. If they do not both fit, Ollama evicts one on every single
+turn, and each reload costs seconds. That is why the default uses one model for
+both jobs. Measured on an RTX 3050 6 GB, time to the first word of the answer:
+
+| Router | Answer | 1st word | Intent accuracy |
+|---|---|---|---|
+| `qwen2.5:7b` | `qwen2.5:7b` | **~6s** | 13/13 |
+| `phi3:mini` | `SrishBot` | ~13s | 12/13 |
+| `qwen2.5:7b` | `SrishBot` | ~13s | 13/13 |
+
+With 12 GB or more, both models stay loaded, so SrishBot's fine-tuned persona
+costs nothing:
 
 ```bash
-export GOOGLE_API_KEY="your-key-here"
+SRISH_ROUTER_MODEL=qwen2.5:7b SRISH_CHAT_MODEL=SrishBot uvicorn api_server:app
 ```
 
 ### 4. Model Setup
@@ -114,11 +139,71 @@ ollama create SrishBot -f Modelfile
 
 These were trained separately and must be placed in the project root. Contact the author if needed.
 
-### 5. Run the app
+### 5. Run it
 
+Streamlit web app:
 ```bash
 streamlit run agentic_bot.py
 ```
+
+HTTP API for the mobile app — bind to `0.0.0.0` so a phone can reach it:
+```bash
+uvicorn api_server:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## 📱 Mobile app integration
+
+The Srijan app calls this API instead of embedding the Streamlit page. Ollama
+cannot run on a phone, so `api_server.py` has to run on a reachable machine.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Readiness. Reports whether Ollama is up and both models are present |
+| `POST /chat` | One turn, whole reply at once |
+| `POST /chat/stream` | Same turn streamed as newline-delimited JSON — **prefer this on mobile** |
+
+Request body for both chat endpoints:
+
+```json
+{
+  "message": "meri plant ke patte peele ho rahe hain",
+  "history": [{"role": "user", "content": "hi"},
+              {"role": "assistant", "content": "Namaste Ji!"}],
+  "farm_id": "FARM_001",
+  "depth": false
+}
+```
+
+`/chat` returns the whole answer:
+
+```json
+{
+  "reply": "...", "intent": "tomato_disease", "language": "hinglish",
+  "degraded": false, "used_kb": true, "kb_disease": "Early Blight",
+  "farm_rows": [], "error": null
+}
+```
+
+`/chat/stream` returns one JSON object per line:
+
+```
+{"type": "meta",  "intent": "tomato_disease", "language": "hinglish", "degraded": false}
+{"type": "token", "text": "Patte "}
+{"type": "token", "text": "peele "}
+{"type": "done",  "reply": "Patte peele ...", "farm_rows": [], "error": null}
+```
+
+Routing takes a few seconds before the first token, so `meta` arrives first and
+lets the UI show the detected intent while the answer is still being written.
+
+**`degraded: true` matters.** It means the router was unreachable, so the
+off-topic filter and the knowledge base were both skipped for that turn. The
+answer is less trustworthy and the UI should say so rather than hide it.
+
+The app side lives in `services/api/chatService.jsx` and `config/srish.js` in
+the [sriapp repo](https://github.com/SRIJAN-SRISH/sriapp).
 
 ---
 
@@ -156,7 +241,7 @@ The fine-tuned model handles domain-specific agricultural language and maintains
 | 11 | Tomato Mosaic |
 | 12 | Tomato Yellow Leaf Curl |
 
-Each entry includes causative agent, distribution, signs & symptoms, conditions for spread, and cure/management — used as RAG context when Gemini identifies a disease match.
+Each entry includes causative agent, distribution, signs & symptoms, conditions for spread, and cure/management — used as RAG context when the router identifies a disease match.
 
 ---
 
