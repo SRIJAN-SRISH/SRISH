@@ -18,7 +18,7 @@ numpy>=1.24.0
 ultralytics>=8.0.0
 Pillow>=10.0.0
 
-# Farm data via n8n (farm_data.py)
+# Farm data: Supabase REST by default, n8n webhook optionally (farm_data.py)
 requests>=2.31.0
 
 # Optional: only needed if you set SRISH_ORCHESTRATOR=gemini.

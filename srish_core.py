@@ -507,7 +507,11 @@ def _prepare(
 
     # Hard exit: don't ask the model to narrate numbers that don't exist.
     if farm_facts and farm_facts.startswith(("NO_FARM_DATA", "NO_DATA")):
-        out["reply"] = NO_DATA_REPLY
+        # Pass the reason through verbatim rather than only the canned line, so
+        # "no rows in the last 7 days, newest is 53 days ago" reaches the farmer
+        # instead of a vague "no data available".
+        detail = farm_facts.split(": ", 1)[1].rstrip(".") if ": " in farm_facts else ""
+        out["reply"] = NO_DATA_REPLY + (f"\n\n_({detail})_" if detail else "")
         out["error"] = farm_facts
         return out, None
 
