@@ -39,3 +39,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Runtime logs from scripts/start_srish.ps1
+logs/
