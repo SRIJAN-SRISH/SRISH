@@ -137,15 +137,23 @@ if (-not $NoPortal) {
 
 # ── Report ───────────────────────────────────────────────────────────────────
 Start-Sleep -Seconds 6
-$lan = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
-        Select-Object -First 1).IPAddress
-
 Say ""
 Say "=== ready ===" "Cyan"
-Say "  API     http://${lan}:$ApiPort        (set EXPO_PUBLIC_SRISH_API_URL to this)"
 if (-not $NoPortal) { Say "  Portal  http://localhost:$PortalPort" }
 Say "  Health  http://127.0.0.1:$ApiPort/health"
+
+# Every usable address, not just the first. The Wi-Fi one comes from DHCP and
+# changes; reporting a single address is how a stale one ended up baked into
+# the app, which then showed Offline against a perfectly healthy server.
+$addrs = Get-NetIPAddress -AddressFamily IPv4 |
+         Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
+Say "  API addresses the phone can use:"
+foreach ($a in $addrs) {
+    $note = ""
+    if ($a.InterfaceAlias -like "*Tailscale*") { $note = "  <- stable across networks" }
+    elseif ($a.InterfaceAlias -like "*Wi-Fi*") { $note = "  <- DHCP, changes" }
+    Say ("    http://{0}:{1}  [{2}]{3}" -f $a.IPAddress, $ApiPort, $a.InterfaceAlias, $note)
+}
 Say "  Log     $Log"
 
 if (-not (Test-Port $ApiPort)) {

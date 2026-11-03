@@ -102,9 +102,23 @@ try {
 } catch { }
 
 # ── Where the phone should point ─────────────────────────────────────────────
-$lan = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
-        Select-Object -First 1).IPAddress
+# Every usable address, not just the first. The Wi-Fi address comes from DHCP
+# and changes, and printing only one is how a stale address ended up baked into
+# the app, which then showed Offline against a perfectly healthy server.
 Write-Host ""
-Write-Host "  For the app:  EXPO_PUBLIC_SRISH_API_URL=http://${lan}:$ApiPort" -ForegroundColor Cyan
+Write-Host "  Addresses the phone can use" -ForegroundColor Cyan
+$addrs = Get-NetIPAddress -AddressFamily IPv4 |
+         Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
+foreach ($a in $addrs) {
+    $note = ""
+    if ($a.InterfaceAlias -like "*Tailscale*") { $note = "  <- stable across networks" }
+    elseif ($a.InterfaceAlias -like "*Wi-Fi*" -or $a.InterfaceAlias -like "*Ethernet*") {
+        $note = "  <- DHCP, changes"
+    }
+    Write-Host ("    http://{0}:{1}   [{2}]{3}" -f $a.IPAddress, $ApiPort, $a.InterfaceAlias, $note)
+}
+Write-Host ""
+Write-Host "  The app probes these automatically. To pin one:" -ForegroundColor Gray
+$wifi = ($addrs | Where-Object { $_.InterfaceAlias -notlike "*Tailscale*" } | Select-Object -First 1).IPAddress
+Write-Host ("    EXPO_PUBLIC_SRISH_API_URL=http://{0}:{1} npx expo start" -f $wifi, $ApiPort) -ForegroundColor Cyan
 Write-Host ""
